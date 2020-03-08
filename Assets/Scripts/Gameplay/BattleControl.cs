@@ -1,4 +1,4 @@
-﻿using System.Collections;
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using Units;
@@ -8,6 +8,12 @@ using System;
 using System.Linq;
 using Cutscenes;
 using System.Threading.Tasks;
+using AI;
+using Buffs;
+using Editors;
+using System.IO;
+using Cutscenes.Stages;
+using Random = UnityEngine.Random;
 
 namespace Gameplay {
 	public class BattleControl : MonoBehaviour {
@@ -15,23 +21,35 @@ namespace Gameplay {
 		//x, y, height (from the bottom)
 		private Battlefield battlefield;
 		private Level level;
+		private GameObjective objective;
 		[SerializeField]
 		private GameObject[] tilePrefabs;
 		[SerializeField]
 		private GameObject[] unitPrefabs;
 
-		private GameObject highlightedObject;
-		private BattleLoopStage battleStage;
-		private List<Coord> moveOptions;
-		private List<Unit> highlightedEnemyUnits;
-		private Unit highlightedFriendlyUnit;
-
-		private int currentCharacter;
-		private int playerCharacter;
-
-		//Just a refrence to the cutscene prefab
 		[SerializeField]
-		private Cutscene cutscene;
+		private Transform tilesHolder;
+		[SerializeField]
+		private TileGenerator generator;
+		[SerializeField]
+		private FadeOutTransition fade;
+
+
+		private LevelInfo levelInfo;
+
+		public Camera mainCamera;
+		public Camera cutsceneCamera;
+
+		private const float turnDelayMs = 150.0f;
+		private BattleLoopStage battleStage;
+
+		//Use this to keep one of the Update switch blocks from being called multiple times.
+		private bool battleStageChanged = true;
+		public int currentCharacter;
+		public int playerCharacter;
+		public int halfTurnsElapsed;
+
+
 		[SerializeField]
 		private Text turnPlayerText;
 		[SerializeField]
@@ -40,88 +58,87 @@ namespace Gameplay {
 		private Image victoryImage;
 		[SerializeField]
 		private Image defeatImage;
+		[SerializeField]
+		private GameObject cutsceneCanvasPrefab;
+		[SerializeField]
+		private Button skipButton;
+		[SerializeField]
+		private GameObject vipCrownPrefab;
 
-		// Use this for initialization
 		void Start() {
-			//Just for testing because we don't have any way to set the campaign yet:
-			Character[] characters = new[] { new Character("Alice", true), new Character("The evil lord zxqv", false) };
-			List<Coord> alicePickTiles = new List<Coord> { new Coord(0, 0), new Coord(0, 1), new Coord(1, 0) };
-			List<Coord> evilGuyPickTiles = new List<Coord> { new Coord(3, 7), new Coord(7, 4) };
-			Dictionary<Character, List<Coord>> validPickTiles = new Dictionary<Character, List<Coord>>();
-			validPickTiles[characters[0]] = alicePickTiles;
-			validPickTiles[characters[1]] = evilGuyPickTiles;
-			Level level = new Level("DemoMap", characters, null, validPickTiles);
-			Campaign testCampaign = new Campaign("test", 0, new[] { level });
-			Persistance.campaign = testCampaign;
-
-			//This will be encoded in the campaign. Somewhere.
-			CutsceneCharacter blair = CutsceneCharacter.blair;
-			CutsceneCharacter juniper = CutsceneCharacter.juniper;
-			CutsceneScript script = new CutsceneScript(new List<CutsceneScriptLine> {
-				new CutsceneScriptLine(CutsceneAction.SetBackground, background: CutsceneBackground.Academy),
-				new CutsceneScriptLine(CutsceneAction.SetCharacter, character: blair, side: CutsceneSide.Left),
-				new CutsceneScriptLine(CutsceneAction.SayDialogue, character: blair, dialogue: "My name is Blair!"),
-				new CutsceneScriptLine(CutsceneAction.SetCharacter, character: juniper, side: CutsceneSide.Right),
-				new CutsceneScriptLine(CutsceneAction.SayDialogue, character: juniper, dialogue: "and I'm Juniper."),
-				new CutsceneScriptLine(CutsceneAction.SayDialogue, character: blair, dialogue: "There's a third major character, Bruno. He would've been here, but he got tied up with paperwork"),
-				new CutsceneScriptLine(CutsceneAction.SayDialogue, character: juniper, dialogue: "Which is to say we ran out of budget"),
-				new CutsceneScriptLine(CutsceneAction.SayDialogue, character: juniper, dialogue: "Anyways, I hope you enjoy this slick as h*ck demo"),
-				new CutsceneScriptLine(CutsceneAction.TransitionOut, side: CutsceneSide.Right),
-				new CutsceneScriptLine(CutsceneAction.TransitionOut, side: CutsceneSide.Left)
-			});
-			cutscene.setup(script);
-
-			//Actual constructor code. This should still be here after the demo :p
 			playerCharacter = 0;
 			battlefield = new Battlefield();
 			currentCharacter = -1;
 			battleStage = BattleLoopStage.Initial;
+			halfTurnsElapsed = 0;
 
 			turnPlayerText.enabled = false;
 			turnChangeBackground.enabled = false;
 			victoryImage.enabled = false;
 			defeatImage.enabled = false;
+
+			useNormalCamera();
+
 			getLevel();
 			deserializeMap();
+			deserializeLevel();
+
+			mainCamera.GetComponent<CameraController>().updateMaxPos(battlefield.map.GetLength(0), battlefield.map.GetLength(1));
 		}
 
-		// Update is called once per frame
+		// Poor man's state machine. in retrospect i have no idea why i didn't use a proper one. oh well, next game.
 		async void Update() {
 			switch (battleStage) {
 				case BattleLoopStage.Initial:
-					if (!cutscene.inProgress) {
-						advanceBattleStage();
+					if (!battleStageChanged) {
+						break;
 					}
-					break;
-				case BattleLoopStage.Pick:
-					//TODO This is temp just for testing until pick phase gets built. 
-					addUnit(UnitType.Knight, level.characters[0], 0, 0);
-					addUnit(UnitType.Knight, level.characters[0], 1, 0);
-					addUnit(UnitType.Knight, level.characters[0], 0, 1);
-					addUnit(UnitType.Knight, level.characters[1], 3, 7);
-					addUnit(UnitType.Knight, level.characters[1], 4, 7);
-					foreach (Unit unit in battlefield.charactersUnits[level.characters[1]]) {
-						Renderer rend = unit.gameObject.GetComponent<Renderer>();
-						rend.material.shader = Shader.Find("_Color");
-						rend.material.SetColor("_Color", Color.green);
-						rend.material.shader = Shader.Find("Specular");
-						rend.material.SetColor("_SpecColor", Color.green);
-					}
+					battleStageChanged = false;
+
+					playBgm();
+
+					turnPlayerText.text =
+						"Battle objective:\n" +
+						objective.getName();
+					turnPlayerText.enabled = true;
+					turnChangeBackground.enabled = true;
+					await Task.Delay(3000);
 
 					advanceBattleStage();
 					break;
+				case BattleLoopStage.Pick:
+					advanceBattleStage();
+					turnPlayerText.enabled = false;
+					turnChangeBackground.enabled = false;
+
+					break;
 				case BattleLoopStage.BattleLoopStart:
+					if (!battleStageChanged) {
+						break;
+					}
+					battleStageChanged = false;
+					//Check for cutscenes every start phase
+					await runAppropriateCutscenes();
+
 					advanceBattleStage();
 					break;
 				case BattleLoopStage.TurnChange:
-					//There's probably a less fragile way of doing this. It's just to make sure this call only happens once per turn loop.
-					if (!turnPlayerText.enabled) {
-						currentCharacter = (currentCharacter + 1) % level.characters.Length;
-						turnPlayerText.text = level.characters[currentCharacter].name + "'s turn";
-						turnPlayerText.enabled = true;
-						turnChangeBackground.enabled = true;
-						Util.setTimeout(advanceBattleStage, 1000);
+					//If we've already entered this we're awaiting. Don't call it again every frame.
+					if (!battleStageChanged) {
+						break;
 					}
+					battleStageChanged = false;
+
+					currentCharacter = (currentCharacter + 1) % level.characters.Length;
+					turnPlayerText.text =
+						level.characters[currentCharacter].name + "'s turn\n" +
+						"Turns remaining:  " + (objective.maxHalfTurns - halfTurnsElapsed);
+					turnPlayerText.enabled = true;
+					turnChangeBackground.enabled = true;
+
+					await Task.Delay(1000);
+
+					advanceBattleStage();
 					break;
 				case BattleLoopStage.TurnChangeEnd:
 					turnPlayerText.enabled = false;
@@ -129,272 +146,479 @@ namespace Gameplay {
 					advanceBattleStage();
 					break;
 				case BattleLoopStage.UnitSelection:
-					//Player input. LMB
-					if (Input.GetButtonDown("Select")) {
-						RaycastHit hit;
-						Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
-						if (Physics.Raycast(ray, out hit, 1000.0f)) {
-							Vector3Int tileCoords = Util.WorldToGrid(hit.transform.position);
-							IBattlefieldItem selectedItem = battlefield.battlefieldItemAt(tileCoords.x, tileCoords.y, tileCoords.z);
-							if (selectedItem is Tile) {
-								//Selected a tile, show info abt that tile
-								//TODO: Show info about tile if a tile is clicked
-								Tile selectedTile = selectedItem as Tile;
-								highlightSingleObject(selectedTile.gameObject);
+					advanceBattleStage();
+					break;
+				case BattleLoopStage.ActionSelection:
+					//If we've already entered this we're awaiting. Don't call it again every frame.
+					if (!battleStageChanged) {
+						break;
+					}
+					battleStageChanged = false;
 
-							} else if (selectedItem is Unit) {
-								Unit selectedUnit = selectedItem as Unit;
+					//The getMove function returns null if no move should be made,
+					//possibly in the event of the selection loop being interrupted by a manually ended turn
+					Move move = await level.characters[currentCharacter].getMove();
+					//Since no move occurs, nothing else needs to be done this turn (since nothing changed).
+					if (move == null) {
+						break;
+					}
 
-								if (selectedUnit.getCharacter(battlefield) == level.characters[currentCharacter] && !selectedUnit.hasMovedThisTurn) {
-									//Selected friendly unit. show move options.
-									highlightSingleObject(selectedUnit.gameObject, 1);
-									this.highlightedFriendlyUnit = selectedUnit;
+					Unit ourUnit = battlefield.units[move.from.x, move.from.y];
 
-									moveOptions = selectedUnit.getValidMoves(tileCoords.x, tileCoords.y, battlefield);
-									foreach (Coord moveOption in moveOptions) {
-										highlightMultipleObjects(battlefield.map[moveOption.x, moveOption.y].Peek().gameObject);
-									}
+					if (ourUnit == null) {
+						Debug.LogWarning("In BattleControl.update(), a move originated from a nonexistent unit, probably due to an ended turn.");
+						break;
+					}
 
-									this.highlightedEnemyUnits = selectedUnit.getTargets(tileCoords.x, tileCoords.y, battlefield, level.characters[currentCharacter]);
-									foreach (Unit targetableUnit in highlightedEnemyUnits) {
-										highlightMultipleObjects(targetableUnit.gameObject, 2);
-									}
+					IBattlefieldItem selectedItem = battlefield.battlefieldItemAt(move.to.x, move.to.y);
+					if (move.from.Equals(move.to)) {
+						//This is the null move. just do nothing!
+						ourUnit.hasMovedThisTurn = true;
+						ourUnit.setHasAttackedThisTurn(true);
+						ourUnit.greyOut();
+					} else if (selectedItem is Tile) {
+						//We selected a tile! lets move to it
+						await moveUnit(ourUnit, move.to);
 
-									advanceBattleStage();
-								} else {
-									//Selected enemy unit. Show unit and its move options.
-									//TODO: highlight enemy's valid move tiles.
-								}
+						if (ourUnit.getTargets(move.to.x, move.to.y, battlefield, level.characters[currentCharacter]).Count == 0) {
+							ourUnit.greyOut();
+							ourUnit.setHasAttackedThisTurn(true);
+						}
 
-							} else if (selectedItem == null) {
-								//Clicked on empty space! Nbd, don't do anything.
-								Debug.Log("Clicked on empty space");
+					} else if (selectedItem is Unit) {
+						//Targeted a hostile unit! fight!
+						Unit selectedUnit = selectedItem as Unit;
 
-							} else {
-								Debug.LogWarning("Item of unrecognized type clicked on.");
+						await rotateUnit(ourUnit, battlefield.getUnitCoords(selectedUnit));
+						bool defenderDefeated = await ourUnit.doBattleWith(
+							selectedUnit,
+							battlefield.map[move.to.x, move.to.y].Peek(),
+							battlefield);
+
+						if (!defenderDefeated && (selectedItem is MeleeUnit) && (ourUnit is MeleeUnit)) {
+							await rotateUnit(selectedUnit, battlefield.getUnitCoords(ourUnit));
+							//Counterattack applied only when both units are Melee
+							await selectedUnit.doBattleWith(
+								ourUnit,
+								battlefield.map[move.from.x, move.from.y].Peek(),
+								battlefield);
+						}
+
+						//Re-grey model if needed... I'm regretting my desire to make the health ui manager stateless :p
+						if (ourUnit is HealerUnit) {
+							if ((selectedUnit.hasMovedThisTurn
+								&& selectedUnit.getTargets(move.to.x, move.to.y, battlefield, level.characters[currentCharacter]).Count == 0)
+								|| selectedUnit.getHasAttackedThisTurn()) {
+								selectedUnit.greyOut();
+							}
+						}
+
+						ourUnit.setHasAttackedThisTurn(true);
+						// await Task.Delay(TimeSpan.FromMilliseconds(turnDelayMs));
+					} else {
+						Debug.LogWarning("Item of unrecognized type clicked on.");
+					}
+
+
+					ourUnit.hasMovedThisTurn = true;
+
+					await runAppropriateCutscenes();
+
+					//Check if we eliminated the last unit.
+					await checkWinAndLose();
+
+					// Update AI capture point if Intercept mission
+					if (objective is InterceptObjective) {
+						foreach (Character c in level.characters) {
+							if (c.agent is DefendAgent) {
+								(c.agent as DefendAgent).capturePoint = battlefield.getUnitCoords((objective as InterceptObjective).vips[0]);
 							}
 						}
 					}
 
-
-					//If player has selected a move:
-					//TODO play the animation
-					break;
-				case BattleLoopStage.ActionSelection:
-					if (Input.GetButtonDown("Select")) {
-						RaycastHit hit;
-						Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
-						if (Physics.Raycast(ray, out hit, 1000.0f)) {
-							Vector3Int tileCoords = Util.WorldToGrid(hit.transform.position);
-							IBattlefieldItem selectedItem = battlefield.battlefieldItemAt(tileCoords.x, tileCoords.y, tileCoords.z);
-							if (selectedItem is Tile) {
-								//We selected a tile! lets move to it
-								if (moveOptions.Any(move => (move.x == tileCoords.x && move.y == tileCoords.y))) {
-									moveUnit(highlightedFriendlyUnit, tileCoords);
-									deselectMoveOptions();
-
-									highlightedFriendlyUnit.hasMovedThisTurn = true;
-
-									if (battlefield.charactersUnits[level.characters[currentCharacter]].All(unit => unit.hasMovedThisTurn)) {
-										advanceBattleStage();
-									} else {
-										this.battleStage = BattleLoopStage.UnitSelection;
-									}
-								}
-
-							} else if (selectedItem == null) {
-								//Clicked on empty space, deselect
-								deselectMoveOptions();
-								battleStage = BattleLoopStage.UnitSelection;
-
-							} else if (selectedItem is Unit) {
-								Unit selectedUnit = selectedItem as Unit;
-
-								if (highlightedFriendlyUnit == selectedUnit) {
-									//clicked on the same unit, deselect
-									deselectMoveOptions();
-									battleStage = BattleLoopStage.UnitSelection;
-
-								} else if (selectedUnit.getCharacter(battlefield) == level.characters[currentCharacter]) {
-									//Clicked on a friendly unit. Deselect the current one.
-									deselectMoveOptions();
-									battleStage = BattleLoopStage.UnitSelection;
-
-								} else {
-									//Clicked on a hostile unit! fight!
-									if (highlightedEnemyUnits.Contains(selectedUnit)) {
-										bool defenderDefeated = highlightedFriendlyUnit.doBattleWith(
-											selectedUnit,
-											battlefield.map[tileCoords.x, tileCoords.y].Peek(),
-											battlefield);
-
-										await Task.Delay(TimeSpan.FromMilliseconds(250));
-
-										if (defenderDefeated) {
-											highlightedEnemyUnits.RemoveAll(units => units == null);
-										} else {
-											//Counterattack
-											Coord unitCoords = battlefield.getUnitCoords(highlightedFriendlyUnit);
-											selectedUnit.doBattleWith(
-												highlightedFriendlyUnit,
-												battlefield.map[unitCoords.x, unitCoords.y].Peek(),
-												battlefield);
-										}
-										checkWinAndLose();
-
-										highlightedFriendlyUnit.hasMovedThisTurn = true;
-										await Task.Delay(TimeSpan.FromMilliseconds(250));
-										deselectMoveOptions();
-
-										//If all of our units have moved advance. Otherwise, go back to unit selection.
-										if (battlefield.charactersUnits[level.characters[currentCharacter]].All(unit => unit.hasMovedThisTurn)) {
-											advanceBattleStage();
-										} else {
-											this.battleStage = BattleLoopStage.UnitSelection;
-										}
-									}
-								}
-							} else {
-								Debug.LogWarning("Item of unrecognized type clicked on.");
-							}
+					//If all of our units have moved advance. Otherwise, go back to unit selection.
+					if (battlefield.charactersUnits[level.characters[currentCharacter]].All(unit => {
+						//I know this looks inelegant but it avoid calling getUnitCoords if necessary
+						if (!unit.hasMovedThisTurn) {
+							return false;
+						} else if (unit.getHasAttackedThisTurn()) {
+							return true;
+						} else {
+							Coord coord = battlefield.getUnitCoords(unit);
+							return unit.getTargets(coord.x, coord.y, battlefield, level.characters[currentCharacter]).Count == 0;
 						}
+					})) {
+						advanceBattleStage();
+					} else {
+						setBattleLoopStage(BattleLoopStage.UnitSelection);
 					}
 
 					break;
 				case BattleLoopStage.EndTurn:
+					//If we've already entered this we're awaiting. Don't call it again every frame.
+					if (!battleStageChanged) {
+						break;
+					}
+					battleStageChanged = false;
+
+					//Check cutscenes every end phase
+					await runAppropriateCutscenes();
+
 					foreach (Unit unit in battlefield.charactersUnits[level.characters[currentCharacter]]) {
+						Coord coord = battlefield.getUnitCoords(unit);
+						Tile tile = battlefield.map[coord.x, coord.y].Peek();
+						await checkTile(tile, unit);
 						unit.hasMovedThisTurn = false;
+						unit.setHasAttackedThisTurn(false);
 					}
 
-					checkWinAndLose();
-					advanceBattleStage();
+					bool endGame = await checkWinAndLose();
+					if (!endGame) {
+						advanceBattleStage();
+					}
+
+					halfTurnsElapsed++;
+
 					break;
 			}
 		}
 
-		private async void checkWinAndLose() {
-			if (winCondition()) {
-				//TODO: advance campaign
-				victoryImage.enabled = true;
-
-				await Task.Delay(TimeSpan.FromMilliseconds(6000));
-
-				victoryImage.enabled = false;
-
-				//This will be encoded in the campaign
-				CutsceneCharacter blair = CutsceneCharacter.blair;
-				CutsceneScript script = new CutsceneScript(new List<CutsceneScriptLine> {
-					new CutsceneScriptLine(CutsceneAction.SetBackground, background: CutsceneBackground.None),
-					new CutsceneScriptLine(CutsceneAction.SetCharacter, character: blair, side: CutsceneSide.Left),
-					new CutsceneScriptLine(CutsceneAction.SayDialogue, character: blair, dialogue: "That sure was a intense battle huh?"),
-					new CutsceneScriptLine(CutsceneAction.SayDialogue, character: blair, dialogue: "Oh no! it looks like the evil lord zxqv is getting away. Does this qualify as a plot hook?"),
-				});
-				Cutscene endCutscene = Instantiate(cutscene);
-				endCutscene.setup(script, cutscene);
-
-			} else if (loseCondition()) {
-				defeatImage.enabled = true;
-			}
-		}
-
-		//Returns true if the human player has won, false otherwise
-		private bool winCondition() {
-			foreach (Character character in battlefield.charactersUnits.Keys) {
-				if (character != level.characters[playerCharacter]) {
-					if (battlefield.charactersUnits[character].Count() != 0) {
-						return false;
-					}
-				}
-			}
-			return true;
-		}
-
-		//returns true if the human player has lost, false otherwise
-		private bool loseCondition() {
-			if (battlefield.charactersUnits[level.characters[playerCharacter]].Count() == 0) {
+		private async Task<bool> checkWinAndLose() {
+			if (objective.isWinCondition(halfTurnsElapsed) || Input.GetKey(KeyCode.P)) {
+				await advanceCampaign();
 				return true;
-			}
-			return false;
-		}
 
-		private void moveUnit(Unit unit, Vector3Int target) {
-			Coord unitCoords = battlefield.getUnitCoords(unit);
-			battlefield.units[target.x, target.y] = unit;
-			battlefield.units[unitCoords.x, unitCoords.y] = null;
-			unit.gameObject.transform.position = Util.GridToWorld(target + new Vector3Int(0, 0, 1));
-		}
-
-		private void highlightSingleObject(GameObject objectToHighlight, int colorIndex = 0) {
-			//Deselect the old object
-			if (highlightedObject != null) {
-				unhighlightMultipleObjects(highlightedObject);
-			}
-
-			//Deselect the currently selected one one if we're clicking on it
-			if (highlightedObject == objectToHighlight) {
-				unhighlightMultipleObjects(highlightedObject);
-				highlightedObject = null;
+			} else if (objective.isLoseCondition(halfTurnsElapsed)) {
+				await restartLevelDefeat();
+				return true;
 			} else {
-				//Select the new one
-				highlightedObject = objectToHighlight;
-				highlightMultipleObjects(highlightedObject, colorIndex);
+				return false;
 			}
 		}
 
-		private void highlightMultipleObjects(GameObject objectToHighlight, int colorIndex = 0) {
-			objectToHighlight.AddComponent<cakeslice.Outline>();
-			objectToHighlight.GetComponent<cakeslice.Outline>().color = colorIndex;
-		}
-
-		private void unhighlightMultipleObjects(GameObject objectToHighlight) {
-			if (objectToHighlight != null) {
-				Destroy(objectToHighlight.GetComponent<cakeslice.Outline>());
+		private async Task checkTile(Tile tile, Unit unit) {
+			TileEffects effects = tile.tileEffects;
+			switch (effects) {
+				case TileEffects.Normal:
+					break;
+				case TileEffects.DOT:
+					await unit.changeHealth(-20, true);
+					break;
+				case TileEffects.Heal:
+					await unit.changeHealth(20, true);
+					break;
 			}
 		}
 
-		//Convenience
-		private void advanceBattleStage() {
-			battleStage = battleStage.NextPhase();
-		}
+		private async Task advanceCampaign() {
+			victoryImage.enabled = true;
+			Audio.playSound("Victory", false, false);
+			await Task.Delay(TimeSpan.FromMilliseconds(6000));
+			victoryImage.enabled = false;
 
-		private void deserializeMap() {
-			battlefield.map = Serialization.DeserializeTilesStack(Serialization.ReadData(level.mapFileName), tilePrefabs);
-			battlefield.units = new Unit[battlefield.map.GetLength(0), battlefield.map.GetLength(1)];
-		}
+			Persistence.campaign.levelIndex++;
 
-		private void getLevel() {
-			level = Persistance.campaign.levels[Persistance.campaign.levelIndex];
-		}
+			await runAppropriateCutscenes(true);
 
-		private void deselectMoveOptions() {
-			if (moveOptions == null) {
-				//Someone accidentally called this twice in a row
-				return;
+			//check for end of campaign
+			if (Persistence.campaign.levelIndex >= Persistence.campaign.levels.Count()) {
+				fade.fadeToScene("VictoryScene");
+			} else {
+				Persistence.saveProgress();
+				//Oh Boy im glad this works.
+				fade.fadeToScene("DemoBattle");
 			}
-
-			foreach (Coord moveOption in moveOptions) {
-				unhighlightMultipleObjects(battlefield.map[moveOption.x, moveOption.y].Peek().gameObject);
-			}
-
-			foreach (Unit highlightedEnemyUnit in highlightedEnemyUnits) {
-				unhighlightMultipleObjects(highlightedEnemyUnit.gameObject);
-			}
-
-			highlightSingleObject(highlightedObject);
-			moveOptions = null;
-			highlightedEnemyUnits = null;
-			highlightedObject = null;
 		}
 
-		private void addUnit(UnitType unitType, Character character, int x, int y) {
+		private async Task restartLevelDefeat() {
+			defeatImage.enabled = true;
+			await Task.Delay(TimeSpan.FromMilliseconds(6000));
+			victoryImage.enabled = false;
+			//TODO show ui to quit or retry
+
+			//Restart the level, don't increment
+			fade.fadeToScene("DemoBattle");
+		}
+
+		private void addUnit(UnitType unitType, Character character, int x, int y, Faction faction) {
 			int index = (int)(unitType);
+
+			//hack demo is in 15 hours i'm so tired let me sleep
+			Vector3 offset = new Vector3(0, -2.2f, 0);
+			if (unitType == UnitType.LightHorse || unitType == UnitType.HeavyHorse) {
+				offset += new Vector3(0, -0.8f, 0);
+			}
+
 			GameObject newUnitGO = Instantiate(
 				unitPrefabs[index],
-				Util.GridToWorld(x, y, battlefield.map[x, y].Count + 1),
+				Util.GridToWorld(x, y, battlefield.map[x, y].Count + 1) + offset,
 				unitPrefabs[index].gameObject.transform.rotation);
 
 			Unit newUnit = newUnitGO.GetComponent<Unit>();
+			newUnit.setFaction(faction);
 			battlefield.addUnit(newUnit, character, x, y);
+		}
+
+		private async Task moveUnit(Unit unit, Coord target) {
+			Coord unitCoords = battlefield.getUnitCoords(unit);
+			battlefield.units[unitCoords.x, unitCoords.y] = null;
+			battlefield.units[target.x, target.y] = unit;
+
+			Vector3 startPos = unit.gameObject.transform.position;
+			Vector3 endPos = Util.GridToWorld(
+				new Vector3Int(target.x, target.y, battlefield.map[target.x, target.y].Count + 1)
+			);
+
+			//hack demo is in 15 hours i'm so tired let me sleep
+			Vector3 offset = new Vector3(0, -2.2f, 0);
+			if (unit is LightHorse || unit is HeavyHorse) {
+				offset += new Vector3(0, -0.8f, 0);
+			}
+			endPos += offset;
+
+			//Rotate to face target
+			await rotateUnit(unit, target);
+
+			//interpolate. 
+			float moveUnitProgress = 0.0f;
+			while (moveUnitProgress < turnDelayMs) {
+				//Slower at the start and end. a beautiful logistic curve. 
+				float progressPercent = 1 / (1 + Mathf.Pow((float)(Math.E), -4 * ((moveUnitProgress / turnDelayMs) - 0.5f)));
+
+				unit.gameObject.transform.position = Vector3.Lerp(startPos, endPos, progressPercent);
+				await Task.Delay(10);
+				moveUnitProgress += 10;
+			}
+			//Just in case....
+			unit.gameObject.transform.position = endPos;
+
+			//Yes yes i know this is terrible.
+			if (unit is RangedUnit) {
+				unit.setHasAttackedThisTurn(true);
+			}
+		}
+
+		private async Task rotateUnit(Unit unit, Coord target) {
+			Quaternion startPos = unit.gameObject.transform.rotation;
+			Vector3 relPos = unit.transform.position;
+			relPos -= (new Vector3(0, unit.transform.position.y, 0) + Util.GridToWorld(target));//change this to actual coords
+			Quaternion endPos = Quaternion.LookRotation(relPos, Vector3.up);
+
+			//Help 3d math is hard
+			endPos *= Quaternion.Euler(0, 180, 0);
+
+			float moveUnitProgress = 0.0f;
+			while (moveUnitProgress < turnDelayMs) {
+				//Slower at the start and end. a beautiful logistic curve. 
+				float progressPercent = 1 / (1 + Mathf.Pow((float)(Math.E), -4 * ((moveUnitProgress / turnDelayMs) - 0.5f)));
+
+				unit.gameObject.transform.rotation = Quaternion.Lerp(startPos, endPos, progressPercent);
+
+				await Task.Delay(10);
+				moveUnitProgress += 10;
+			}
+
+			//Just in case....
+			unit.gameObject.transform.rotation = endPos;
+		}
+
+		private async Task runAppropriateCutscenes(bool afterVictoryImage = false) {
+			foreach (Cutscene cutscene in level.cutscenes) {
+				if (cutscene.executionCondition(new ExecutionInfo(battlefield, objective, halfTurnsElapsed, battleStage, afterVictoryImage))) {
+					await runCutscene(cutscene);
+					//I know this is bad practice, but it'll force the engine not to execute multiple cutscenes with the static resources
+					break;
+				}
+			}
+		}
+
+		private async Task runCutscene(Cutscene cutscene) {
+
+			//Hacky solution to cutscene canvas not being designed for multiple different cutscenes being played.
+			Stage cutsceneCanvas = Instantiate(
+				cutsceneCanvasPrefab,
+				cutsceneCanvasPrefab.transform.position,
+				cutsceneCanvasPrefab.transform.rotation,
+				this.transform)
+				.GetComponent<Stage>();
+			skipButton.onClick.AddListener(() => cutsceneCanvas.skipCutscene());
+			cutsceneCanvas.skipButton = skipButton.gameObject;
+			cutsceneCanvas.startCutscene(cutscene);
+			useCutsceneCamera();
+
+			//Wait for cutscene to finish.
+			while (cutsceneCanvas.isRunning) {
+				//Unity, forgive me for not using coroutines. I am repentant. I understand my crimes and will not recommimt.
+				await Task.Delay(100);
+			}
+
+			//Even though the cutscene can never be accessed again, this is a whole lot cleaner.
+			Destroy(cutsceneCanvas);
+			skipButton.onClick.RemoveAllListeners();
+
+			useNormalCamera();
+		}
+
+		private void useCutsceneCamera() {
+			CameraController.inputEnabled = false;
+			mainCamera.enabled = false;
+			cutsceneCamera.enabled = true;
+		}
+
+		private void useNormalCamera() {
+			CameraController.inputEnabled = true;
+			cutsceneCamera.enabled = false;
+			mainCamera.enabled = true;
+		}
+
+		private void playBgm() {
+			string bgm = Audio.battleBgm[Random.Range(0, Audio.battleBgm.Length - 1)];
+
+			//Hack to play finall boss music
+			if (Persistence.campaign.levelIndex == (Persistence.campaign.levels.Count() - 1)) {
+				bgm = "FinalBattle";
+			}
+
+			Audio.playSound(bgm, true, true);
+		}
+
+		private void advanceBattleStage() {
+			battleStage = battleStage.NextPhase();
+			battleStageChanged = true;
+		}
+
+		private void setBattleLoopStage(BattleLoopStage stage) {
+			battleStage = stage;
+			battleStageChanged = true;
+		}
+
+
+		private void deserializeMap() {
+			battlefield.map = Serialization.DeserializeTilesStack(Serialization.ReadData(level.mapFileName, Paths.mapsPath()), generator, tilesHolder);
+
+			battlefield.units = new Unit[battlefield.map.GetLength(0), battlefield.map.GetLength(1)];
+		}
+
+		private void deserializeLevel() {
+			//get all level info for units, objectives and map name
+			LevelInfo levelInfo = Serialization.getLevel(level.levelFileName);
+
+			//add all units
+			//default enemy faction
+			Faction enemyFaction = Faction.Velgari;
+			try {
+				Stack<UnitInfo> stack = levelInfo.units;
+				while (stack.Count != 0) {
+					UnitInfo info = stack.Pop();
+
+					if (info.getFaction() == Faction.Xingata) {
+						addUnit(info.getUnitType(), level.characters[0], info.getCoord().x, info.getCoord().y, Faction.Xingata);
+					} else {
+						addUnit(info.getUnitType(), level.characters[1], info.getCoord().x, info.getCoord().y, info.getFaction());
+						enemyFaction = info.getFaction();
+					}
+				}
+			} catch (FileNotFoundException ex) {
+				Debug.Log("Incorrect level name" + ex.ToString());
+			}
+
+
+			//get all goal info
+			List<Coord> goalPositions = levelInfo.goalPositions;
+			switch (levelInfo.objective) {
+				case ObjectiveType.Elimination:
+					objective = new EliminationObjective(battlefield, level, level.characters[playerCharacter], 30);
+					break;
+				case ObjectiveType.Escort:
+					objective = new EscortObjective(battlefield, level, level.characters[playerCharacter], 15);
+					//add vips
+					foreach (Coord pos in goalPositions) {
+						addUnit(UnitType.Knight, level.characters[0], pos.x, pos.y, Faction.Xingata);
+						Unit unit = battlefield.units[pos.x, pos.y];
+						(objective as EscortObjective).vips.Add(unit);
+						Instantiate(vipCrownPrefab, unit.transform.position + new Vector3(0, 3, 0), vipCrownPrefab.transform.rotation, unit.transform);
+					}
+					break;
+				case ObjectiveType.Intercept:
+					objective = new InterceptObjective(battlefield, level, level.characters[playerCharacter], 30);
+					foreach (Coord pos in goalPositions) {
+						addUnit(UnitType.Knight, level.characters[1], pos.x, pos.y, enemyFaction);
+						Unit unit = battlefield.units[pos.x, pos.y];
+						(objective as InterceptObjective).vips.Add(unit);
+						foreach (Character c in level.characters) {
+							if (c.agent is DefendAgent) {
+								(c.agent as DefendAgent).VIPs.Add(unit);
+							}
+						}
+						Instantiate(vipCrownPrefab, unit.transform.position + new Vector3(0, 3, 0), vipCrownPrefab.transform.rotation, unit.transform);
+					}
+
+					break;
+				case ObjectiveType.Capture:
+					objective = new CaptureObjective(battlefield, level, level.characters[playerCharacter], 30, goalPositions, 2);
+					foreach (Coord pos in goalPositions) {
+						foreach (Character c in level.characters) {
+							if (c.agent is DefendAgent) {
+								(c.agent as DefendAgent).capturePoint = pos;
+							}
+						}
+						Instantiate(vipCrownPrefab,
+							battlefield.map[pos.x, pos.y].Peek().transform.position + new Vector3(0, 3, 0),
+							vipCrownPrefab.transform.rotation,
+							battlefield.map[pos.x, pos.y].Peek().transform);
+					}
+					break;
+				case ObjectiveType.Defend:
+					objective = new DefendObjective(battlefield, level, level.characters[playerCharacter], 20, goalPositions, 2);
+					foreach (Coord pos in goalPositions) {
+						Instantiate(vipCrownPrefab,
+							battlefield.map[pos.x, pos.y].Peek().transform.position + new Vector3(0, 3, 0),
+							vipCrownPrefab.transform.rotation,
+							battlefield.map[pos.x, pos.y].Peek().transform);
+					}
+					break;
+				case ObjectiveType.Survival:
+					objective = new SurvivalObjective(battlefield, level, level.characters[playerCharacter], 15);
+					break;
+				default:
+					objective = new EliminationObjective(battlefield, level, level.characters[playerCharacter], 20);
+					break;
+			}
+
+		}
+
+		private void getLevel() {
+			//This indicates the scene has been played from the editor, without first running MainMenu. This is a debug mode.
+			if (Persistence.campaign == null && Application.isEditor) {
+				Character[] characters = new[] {
+					new Character("Alice", true, new PlayerAgent()),
+					new Character("The evil lord zxqv", false, new DefendAgent(new Coord(3,7)))
+				};
+
+				level = new Level("CraterCenter", "NewUnitsTest", characters, new Cutscene[] { });
+				Persistence.campaign = new Campaign("test", 0, new[] { level });
+				// cutscene.startCutscene("tutorialEnd");
+			}
+			//  else {
+			// 	Persistance.loadProgress();
+			// }
+
+			level = Persistence.campaign.levels[Persistence.campaign.levelIndex];
+			foreach (Character character in level.characters) {
+				character.agent.battlefield = this.battlefield;
+			}
+		}
+
+		public void skipTurn() {
+			Agent agent = level.characters[currentCharacter].agent;
+			if (currentCharacter == playerCharacter && battleStage == BattleLoopStage.ActionSelection) {
+				if (agent is PlayerAgent) {
+					((PlayerAgent)agent).unhighlightAll();
+					((PlayerAgent)agent).currentMove = null;
+					((PlayerAgent)agent).stopAwaiting = true;
+					setBattleLoopStage(BattleLoopStage.EndTurn);
+				}
+			}
 		}
 
 	}

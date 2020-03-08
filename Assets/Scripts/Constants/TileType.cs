@@ -4,7 +4,29 @@
 		Underground,
 		Grass,
 		Woods,
-		Road,
-		Water
+		RoadVertical,
+		Water,
+		RoadHorizontal,
+		RoadLowerRight,
+		RoadUpperRight,
+		RoadUpperLeft,
+		RoadLowerLeft,
+		Sand,
+		Scrub,
+		Plains,
+		CastleVertical,
+		CastleHorizontal,
+		CastleCorner,
+		PalisadeVertical,
+		PalisadeHorizontal,
+		PalisadeCorner,
+		Rock,
+		Snow
 	}
+    public enum TileEffects
+    {
+        Normal,
+        DOT,
+        Heal
+    };
 }
